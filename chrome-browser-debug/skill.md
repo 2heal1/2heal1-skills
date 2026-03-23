@@ -1,91 +1,162 @@
-# Chrome Browser Debug Skill
+---
+name: chrome-browser-debug
+description: Given a URL, navigate to it in the user's Chrome and capture browser diagnostics via Chrome DevTools Protocol — including console logs (errors/warns/info), JavaScript variable values, and network request details (status codes, payloads, failures). Use this skill whenever the user wants to inspect what's happening inside a browser page: frontend bugs, white screens, JS exceptions, API call failures, CORS errors, or wants to read a specific variable/state from the running page. Also trigger when user says things like "帮我看看报错", "页面崩了", "浏览器有错误", "前端报错了", "看看这个接口返回了什么", "帮我查一下这个变量的值". Always attempt to capture diagnostics before asking the user to copy-paste errors manually.
+---
 
-## 概述
+# chrome-browser-debug
 
-本 Skill 封装了通过 **chrome-devtools-mcp**（基于 Chrome DevTools Protocol / CDP）直接连接浏览器，获取控制台日志、网络请求、JS 运行时变量等能力，供 Aime Agent 在调试前端项目时直接使用。
+Navigate to a URL in the user's running Chrome, collect all console logs and errors, return structured JSON for analysis.
 
-## 背景
+Uses the user's existing Chrome session — cookies and auth state are preserved. Works for localhost and production URLs alike.
 
-Google 官方维护的 `chrome-devtools-mcp` 项目将 Chrome DevTools Protocol 包装为 MCP Server，使 AI Agent 能像人工使用 DevTools 一样：
+## Prerequisites
 
-- 读取 Console 日志（含报错、警告）
-- 监控 Network 请求（请求/响应/状态码）
-- 执行 JS 表达式，取运行时变量值
-- 截图当前页面状态
+- **Node.js 21+** — required for built-in WebSocket
+- **Chrome with remote debugging** — one-time setup, see `references/setup.md`
 
-## 工具配置
-
-### 启动 MCP Server
-
-```bash
-npx @google/chrome-devtools-mcp
-```
-
-Chrome 需要以远程调试模式启动：
+Chrome must be running with remote debugging enabled:
 
 ```bash
-# macOS
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-  --remote-debugging-port=9222 \
-  --user-data-dir=/tmp/chrome-debug
-
-# Windows
-chrome.exe --remote-debugging-port=9222 --user-data-dir=C:\chrome-debug
+curl -s http://localhost:9222/json/version
 ```
 
-### MCP 配置示例（mcp_settings.json）
+If this fails, ask the user to relaunch Chrome with `--remote-debugging-port=9222`.
 
+## Workflow
+
+### Step 1 — Verify Chrome is reachable
+
+```bash
+curl -s http://localhost:9222/json/version
+```
+
+- Connection refused → list available Chrome profiles, let user pick, then relaunch:
+
+  **1a. List profiles and detect current one:**
+  ```bash
+  node -e "
+  const fs = require('fs'), path = require('path');
+  const base = process.env.HOME + '/Library/Application Support/Google/Chrome';
+  const state = JSON.parse(fs.readFileSync(base + '/Local State', 'utf8'));
+  const cache = state.profile.info_cache;
+  const last  = state.profile.last_used;
+  console.log('Available Chrome profiles:\n');
+  Object.entries(cache).forEach(([dir, info]) => {
+    const tag = dir === last ? ' ← current' : '';
+    console.log('  ' + dir.padEnd(12) + info.name + tag);
+  });
+  console.log('\nDefault profile dir: ' + last);
+  "
+  ```
+
+  **1b. Sync the selected profile to the debug location and launch:**
+  ```bash
+  # Set PROFILE to the dir shown above (default: current profile)
+  PROFILE="Default"   # ← change to e.g. "Profile 1" if needed
+  CHROME=$(find /Applications ~/Applications -name "Google Chrome" -path "*/MacOS/Google Chrome" 2>/dev/null | head -1)
+  REAL="$HOME/Library/Application Support/Google/Chrome/$PROFILE"
+  DEBUG_DIR="$HOME/Library/Application Support/Google/ChromeDebug"
+  # Sync profile (only copies changed files, fast after first run)
+  rsync -a --delete "$REAL/" "$DEBUG_DIR/Default/"
+  # Relaunch Chrome with debug profile
+  killall "Google Chrome" 2>/dev/null; sleep 1
+  "$CHROME" --remote-debugging-port=9222 --user-data-dir="$DEBUG_DIR" &
+  sleep 3 && curl -s http://localhost:9222/json/version
+  ```
+
+  > **Note:** `rsync --delete` keeps the debug copy in sync with the real profile. Re-run this block any time sessions have expired.
+
+- Returns JSON → proceed
+
+### Step 2 — Capture logs
+
+```bash
+node scripts/capture.mjs "<url>" [timeout_ms] [--vars var1,var2,...]
+```
+
+The script:
+1. Opens a new tab in the user's Chrome (shares their cookies / auth)
+2. Navigates to the URL
+3. Waits until network goes idle for 500ms, or the timeout expires (default: 15s)
+4. Optionally evaluates JavaScript variables in the page context
+5. Closes the tab and returns all captured data as JSON to stdout
+
+Increase timeout for slow pages or heavy SPAs:
+```bash
+node scripts/capture.mjs "https://example.com/dashboard" 30000
+```
+
+Capture JavaScript variables (e.g. Module Federation runtime, Next.js data, feature flags):
+```bash
+node scripts/capture.mjs "https://example.com" 20000 --vars __FEDERATION__,__NEXT_DATA__,featureFlags
+```
+
+Variable capture notes:
+- Variables are evaluated after the page settles (post network-idle)
+- Non-serializable values are handled gracefully: circular references → `[Circular -> path]`, functions → `[Function: name]`, depth > 5 → `[max depth]`
+- `skippedPaths` lists every property that could not be fully serialized, with the reason
+
+### Step 3 — Analyze the output
+
+Output format:
 ```json
 {
-  "mcpServers": {
-    "chrome-devtools": {
-      "command": "npx",
-      "args": ["@google/chrome-devtools-mcp"],
-      "env": {
-        "CHROME_DEBUGGING_PORT": "9222"
-      }
+  "url": "https://example.com/dashboard",
+  "capturedAt": "2026-03-20T10:00:05.123Z",
+  "total": 42,
+  "errors": 3,
+  "warns": 5,
+  "variables": {
+    "__FEDERATION__": {
+      "exists": true,
+      "value": { "runtime": "webpack", "...": "..." },
+      "skippedPaths": [
+        { "path": "__FEDERATION__.snapshotHandler.HostInstance", "reason": "circular", "circularRef": "__FEDERATION__.snapshotHandler" },
+        { "path": "__FEDERATION__.moduleCache.init", "reason": "function", "detail": "init" }
+      ]
+    },
+    "__NEXT_DATA__": {
+      "exists": false,
+      "skippedPaths": []
     }
-  }
+  },
+  "entries": [
+    {
+      "t": "2026-03-20T10:00:01.234Z",
+      "level": "error",
+      "msg": "Cannot read properties of undefined (reading 'user')",
+      "stack": "https://example.com/assets/app.js:1:84231"
+    },
+    {
+      "t": "2026-03-20T10:00:02.100Z",
+      "level": "warn",
+      "msg": "[HTTP] 404 Not Found — https://api.example.com/user/profile",
+      "stack": null
+    }
+  ]
 }
 ```
 
-## 核心工具能力
+**Log levels captured:**
+- `error` / `warn` / `log` / `info` / `debug` — from `console.*`
+- `error` — uncaught JS exceptions (includes stack trace when available)
+- `warn` / `error` — HTTP 4xx / 5xx responses
+- `error` — network failures (CORS, DNS, connection refused)
+- `warn` / `error` — browser-native entries (CSP violations, deprecations)
 
-| 工具名 | 说明 |
-|--------|------|
-| `list_console_messages` | 获取浏览器 Console 日志（含 error/warn/log） |
-| `list_network_requests` | 获取当前页面的网络请求列表 |
-| `evaluate_script` | 在页面上下文中执行 JS，读取运行时变量 |
-| `take_screenshot` | 截图当前页面 |
-| `list_targets` | 列出所有可调试的 Chrome Tab/Target |
-| `navigate_to` | 导航到指定 URL |
+**Structure your analysis as:**
+1. **Error summary** — count by level
+2. **Critical errors first** — entries with stack traces, most recent first
+3. **Patterns** — repeated errors or sequences pointing to root cause
+4. **HTTP / network failures** — API issues, CORS, 404s
+5. **Recommended fixes** — concrete, tied to specific log entries
 
-## 典型使用场景
+### Step 4 — Offer follow-up
 
-### 场景 1：调试前端 A2UI 渲染问题
+- Re-run with a longer timeout if logs seem cut off
+- Re-run after the user takes a specific action to capture interaction errors
 
-> 「帮我看一下浏览器里有没有报错，顺便把 `window.__a2ui_state__` 的值取出来」
+## Reference files
 
-Agent 会调用：
-1. `list_console_messages` 过滤 error 级别日志
-2. `evaluate_script` 执行 `window.__a2ui_state__`
-
-### 场景 2：排查 MF 模块加载失败
-
-> 「MF 组件加载不出来，帮我看看 Network 里有没有 400/500」
-
-Agent 会调用：
-1. `list_network_requests` 过滤状态码 >= 400 的请求
-
-### 场景 3：截图对比 UI 渲染结果
-
-> 「帮我截一下现在的页面」
-
-Agent 会调用：
-1. `take_screenshot`
-
-## 注意事项
-
-- Chrome 必须以 `--remote-debugging-port` 模式启动，普通模式不支持 CDP 连接
-- 生产环境不要开启远程调试端口，仅限本地开发使用
-- 如果连接失败，先用 `list_targets` 检查 Chrome 是否正确暴露了调试接口
+- `references/setup.md` — one-time Chrome setup
+- `scripts/capture.mjs` — the capture script

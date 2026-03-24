@@ -23,6 +23,8 @@ node scripts/capture.mjs --tab-id "$TAB" --click "添加" --vars __FEDERATION__ 
 | `--keep-tab` | Don't close tab after capture; outputs `tabId` in result |
 | `--tab-id <id>` | Attach to existing tab instead of navigating |
 | `--click "<text or selector>"` | Click an element, then wait for network idle |
+| `--fill "placeholder::text"` | Type into an input/textarea located by placeholder |
+| `--select "placeholder::value"` | Choose an option in a select located by placeholder |
 | `--dump-dom` | Output page DOM structure (for identifying selectors) |
 | `--close` | Close the tab after this step |
 
@@ -31,6 +33,24 @@ node scripts/capture.mjs --tab-id "$TAB" --click "添加" --vars __FEDERATION__ 
 Applied in order:
 1. If query starts with `#`, `.`, `[`, or contains `>` → CSS selector
 2. Otherwise → text match: **exact** → **prefix** → **contains**
+
+## Fill (input/textarea)
+
+Locates the field by `placeholder` attribute, injects text using native value setter — compatible with React and Vue controlled inputs.
+
+```bash
+node scripts/capture.mjs --tab-id "$TAB" --fill "请输入关键词::Module Federation"
+```
+
+## Select (dropdown)
+
+Locates by `placeholder` attribute or default option text, then:
+- **Native `<select>`** — sets value directly and dispatches `change`
+- **Custom dropdown** — clicks the trigger to open, then clicks the matching option
+
+```bash
+node scripts/capture.mjs --tab-id "$TAB" --select "请选择环境::生产环境"
+```
 
 ## When element is not found
 

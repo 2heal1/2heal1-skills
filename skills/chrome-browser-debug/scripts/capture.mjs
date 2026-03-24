@@ -2,12 +2,13 @@
 // capture.mjs — collect browser logs + JS variables via Chrome DevTools Protocol
 //
 // New tab:      node capture.mjs <url> [timeout_ms] [--vars v1,v2] [--keep-tab] [--click "text"] [--dump-dom]
-// Existing tab: node capture.mjs --tab-id <id> [--click "text"] [--vars v1,v2] [--dump-dom] [--close]
+// Existing tab: node capture.mjs --tab-id <id> [--click "text"] [--fill "ph::text"] [--select "ph::value"] [--vars v1,v2] [--dump-dom] [--close]
 //
 // Long-chain example:
 //   TAB=$(node capture.mjs https://example.com --keep-tab | jq -r .tabId)
 //   node capture.mjs --tab-id $TAB --click "个人"
-//   node capture.mjs --tab-id $TAB --click "收藏"
+//   node capture.mjs --tab-id $TAB --fill "搜索框placeholder::关键词"
+//   node capture.mjs --tab-id $TAB --select "请选择::选项A"
 //   node capture.mjs --tab-id $TAB --click "添加" --vars __FEDERATION__ --close
 
 const CDP_BASE = 'http://localhost:9222'
@@ -23,6 +24,8 @@ function flagVal(flag) {
 
 const tabId       = flagVal('--tab-id')
 const clickTarget = flagVal('--click')
+const fillArg     = flagVal('--fill')    // "placeholder::text"
+const selectArg   = flagVal('--select')  // "placeholder::value"
 const varNamesRaw = flagVal('--vars')
 const varNames    = varNamesRaw ? varNamesRaw.split(',').map(s => s.trim()).filter(Boolean) : []
 const keepTab     = args.includes('--keep-tab')
@@ -30,7 +33,7 @@ const closeTab    = args.includes('--close')
 const dumpDom     = args.includes('--dump-dom')
 
 // positional args: skip flag names and their values
-const flagsWithValues = new Set(['--tab-id', '--click', '--vars'])
+const flagsWithValues = new Set(['--tab-id', '--click', '--fill', '--select', '--vars'])
 const skipIdx = new Set()
 args.forEach((a, i) => { if (flagsWithValues.has(a)) { skipIdx.add(i); skipIdx.add(i + 1) } })
 const positional = args.filter((a, i) => !a.startsWith('--') && !skipIdx.has(i))
@@ -252,6 +255,115 @@ if (clickTarget) {
   }
 }
 
+// ── fill input (locate by placeholder) ───────────────────────────────────────
+
+let fillResult = null
+
+if (fillArg) {
+  const sep = fillArg.indexOf('::')
+  const placeholder = sep !== -1 ? fillArg.slice(0, sep) : fillArg
+  const text        = sep !== -1 ? fillArg.slice(sep + 2) : ''
+  process.stderr.write(`Filling: placeholder="${placeholder}" text="${text}"\n`)
+
+  const r = await session.send('Runtime.evaluate', {
+    expression: `(function(ph, txt) {
+      const el = document.querySelector('input[placeholder="' + ph + '"], textarea[placeholder="' + ph + '"]');
+      if (!el) return JSON.stringify({ found: false, tried: ph });
+      el.focus();
+      el.scrollIntoView({ behavior: 'instant', block: 'center' });
+      // React/Vue-compatible: use native setter to trigger synthetic events
+      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+      setter.call(el, txt);
+      el.dispatchEvent(new Event('input',  { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return JSON.stringify({ found: true, tag: el.tagName.toLowerCase(), placeholder: el.placeholder });
+    })(${JSON.stringify(placeholder)}, ${JSON.stringify(text)})`,
+    returnByValue: true,
+  })
+
+  fillResult = JSON.parse(r?.result?.value ?? '{"found":false}')
+  if (!fillResult.found) {
+    process.stderr.write(`  Warning: input not found for placeholder="${placeholder}"\n`)
+  } else {
+    process.stderr.write(`  Filled: <${fillResult.tag}> placeholder="${fillResult.placeholder}"\n`)
+    await new Promise(r => setTimeout(r, 200))
+    await waitForNetworkIdle(timeout)
+  }
+}
+
+// ── select option (locate by placeholder) ────────────────────────────────────
+
+let selectResult = null
+
+if (selectArg) {
+  const sep         = selectArg.indexOf('::')
+  const placeholder = sep !== -1 ? selectArg.slice(0, sep) : selectArg
+  const value       = sep !== -1 ? selectArg.slice(sep + 2) : ''
+  process.stderr.write(`Selecting: placeholder="${placeholder}" value="${value}"\n`)
+
+  // Step 1: try native <select>, otherwise click the custom dropdown trigger
+  const r1 = await session.send('Runtime.evaluate', {
+    expression: `(function(ph, val) {
+      // native <select>: match by placeholder attr or first option text
+      const selects = Array.from(document.querySelectorAll('select'));
+      const nativeSel = selects.find(s =>
+        s.getAttribute('placeholder') === ph ||
+        (s.options[0] && s.options[0].text.trim() === ph)
+      );
+      if (nativeSel) {
+        const opt = Array.from(nativeSel.options).find(o => o.text.trim() === val || o.value === val);
+        if (!opt) return JSON.stringify({ found: false, reason: 'option not found', tried: val });
+        nativeSel.value = opt.value;
+        nativeSel.dispatchEvent(new Event('change', { bubbles: true }));
+        return JSON.stringify({ found: true, type: 'native', value: opt.value, text: opt.text.trim() });
+      }
+      // custom dropdown: find trigger by placeholder attr or visible placeholder text
+      let trigger = document.querySelector('[placeholder="' + ph + '"]');
+      if (!trigger) {
+        const candidates = Array.from(document.querySelectorAll(
+          '[role=combobox], [aria-haspopup], [class*=select], [class*=dropdown]'
+        ));
+        trigger = candidates.find(e => e.textContent.trim() === ph);
+      }
+      if (!trigger) return JSON.stringify({ found: false, reason: 'trigger not found', tried: ph });
+      trigger.scrollIntoView({ behavior: 'instant', block: 'center' });
+      trigger.click();
+      return JSON.stringify({ found: true, type: 'custom', step: 'trigger_clicked' });
+    })(${JSON.stringify(placeholder)}, ${JSON.stringify(value)})`,
+    returnByValue: true,
+  })
+
+  selectResult = JSON.parse(r1?.result?.value ?? '{"found":false}')
+
+  if (selectResult.type === 'custom' && selectResult.step === 'trigger_clicked') {
+    // Step 2: wait for dropdown to open, then click the matching option
+    await new Promise(r => setTimeout(r, 300))
+    const r2 = await session.send('Runtime.evaluate', {
+      expression: `(function(val) {
+        const opts = Array.from(document.querySelectorAll(
+          'option, [role=option], [role=menuitem], [class*=option-item], [class*=dropdown-item]'
+        ));
+        const opt = opts.find(e => e.textContent.trim() === val)
+          ?? opts.find(e => e.textContent.trim().includes(val));
+        if (!opt) return JSON.stringify({ found: false, tried: val });
+        opt.click();
+        return JSON.stringify({ found: true, type: 'custom', text: opt.textContent.trim() });
+      })(${JSON.stringify(value)})`,
+      returnByValue: true,
+    })
+    selectResult = JSON.parse(r2?.result?.value ?? '{"found":false}')
+  }
+
+  if (!selectResult.found) {
+    process.stderr.write(`  Warning: select target not found (${selectResult.reason ?? 'unknown'})\n`)
+  } else {
+    process.stderr.write(`  Selected: [${selectResult.type}] "${selectResult.text ?? selectResult.value}"\n`)
+    await new Promise(r => setTimeout(r, 200))
+    await waitForNetworkIdle(timeout)
+  }
+}
+
 // ── DOM dump (for Claude to identify selectors) ───────────────────────────────
 
 let domSnapshot = null
@@ -360,8 +472,10 @@ const result = {
   total:      logs.length,
   errors:     logs.filter(l => l.level === 'error').length,
   warns:      logs.filter(l => l.level === 'warn').length,
-  ...(clickTarget     ? { click: clickResult } : {}),
-  ...(dumpDom         ? { dom: domSnapshot }   : {}),
+  ...(clickTarget     ? { click:  clickResult  } : {}),
+  ...(fillArg         ? { fill:   fillResult   } : {}),
+  ...(selectArg       ? { select: selectResult } : {}),
+  ...(dumpDom         ? { dom:    domSnapshot  } : {}),
   ...(varNames.length ? { variables }          : {}),
   entries: logs,
 }

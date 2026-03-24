@@ -1,6 +1,6 @@
 ---
 name: chrome-browser-debug
-description: Given a URL, navigate to it in the user's Chrome and capture browser diagnostics via Chrome DevTools Protocol — including console logs (errors/warns/info), JavaScript variable values, and network request details (status codes, payloads, failures). Use this skill whenever the user wants to inspect what's happening inside a browser page: frontend bugs, white screens, JS exceptions, API call failures, CORS errors, or wants to read a specific variable/state from the running page. Also trigger when user says things like "帮我看看报错", "页面崩了", "浏览器有错误", "前端报错了", "看看这个接口返回了什么", "帮我查一下这个变量的值". Always attempt to capture diagnostics before asking the user to copy-paste errors manually.
+description: Given a URL, navigate to it in the user's Chrome and capture browser diagnostics via Chrome DevTools Protocol — including console logs (errors/warns/info), JavaScript variable values, and network request details (status codes, payloads, failures). Use this skill whenever the user wants to inspect what's happening inside a browser page "frontend bugs, white screens, JS exceptions, API call failures, CORS errors, or wants to read a specific variable/state from the running page." Also trigger when user says things like "帮我看看报错", "页面崩了", "浏览器有错误", "前端报错了", "看看这个接口返回了什么", "帮我查一下这个变量的值". Always attempt to capture diagnostics before asking the user to copy-paste errors manually.
 ---
 
 # chrome-browser-debug

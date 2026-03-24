@@ -109,12 +109,13 @@ node scripts/capture.mjs --tab-id "$TAB" --click "添加" --vars __FEDERATION__ 
 
 ```
 2heal1-skills/
-└── chrome-browser-debug/
-    ├── SKILL.md                      # skill entry point (read by Claude)
-    ├── scripts/
-    │   └── capture.mjs               # CDP capture script
-    └── references/
-        ├── setup.md                  # one-time Chrome setup
-        ├── single-capture.md         # single capture usage + output format
-        └── long-chain.md             # long-chain usage (click / tabId / dump-dom)
+└── skills/
+    └── chrome-browser-debug/
+        ├── SKILL.md                  # skill entry point (read by Claude)
+        ├── scripts/
+        │   └── capture.mjs           # CDP capture script
+        └── references/
+            ├── setup.md              # one-time Chrome setup
+            ├── single-capture.md     # single capture usage + output format
+            └── long-chain.md         # long-chain usage (click / tabId / dump-dom)
 ```

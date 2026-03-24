@@ -5,8 +5,12 @@ Navigate to a URL, collect logs + variables, tab auto-closes.
 ## Usage
 
 ```bash
-node scripts/capture.mjs "<url>" [timeout_ms] [--vars var1,var2,...]
+node scripts/capture.mjs "<url>" [timeout_ms] [--vars var1,var2,...] [--wait-until auto|domcontentloaded|networkidle|timeout] [--action-wait auto|networkidle|domcontentloaded|timeout|none] [--no-entries]
 ```
+
+Default `auto`:
+- Navigation phase prefers `domcontentloaded` (interaction/variable capture scenarios); pure log collection falls back to `networkidle`
+- When not explicitly specified, `networkidle` uses a shorter wait ceiling to avoid being slowed down by polling-heavy pages
 
 Increase timeout for slow pages or heavy SPAs:
 ```bash
@@ -18,12 +22,32 @@ Capture JavaScript variables:
 node scripts/capture.mjs "https://example.com" 20000 --vars __FEDERATION__,__NEXT_DATA__,featureFlags
 ```
 
+Capture deep path variables:
+```bash
+node scripts/capture.mjs "https://example.com" 20000 --vars __VMOK__.__INSTANCES__,window.__APP_STATE__.user
+```
+
+Performance-first capture (skip heavy entries and avoid long waits):
+```bash
+node scripts/capture.mjs "https://example.com" 12000 --vars __VMOK__.__INSTANCES__ --action-wait none --no-entries
+```
+
 ## Output format
 
 ```json
 {
   "url": "https://example.com/dashboard",
   "capturedAt": "2026-03-20T10:00:05.123Z",
+  "actionWait": "networkidle",
+  "timings": {
+    "navigateMs": 1832,
+    "clickMs": null,
+    "fillMs": null,
+    "selectMs": null,
+    "evalMs": null,
+    "varsMs": 42,
+    "totalMs": 2051
+  },
   "total": 42,
   "errors": 3,
   "warns": 5,
@@ -44,6 +68,11 @@ node scripts/capture.mjs "https://example.com" 20000 --vars __FEDERATION__,__NEX
   ]
 }
 ```
+
+## Performance tips
+
+- When only checking variables, add `--no-entries` to avoid excessive log volume.
+- When a stable selector is available, prefer an exact CSS selector to reduce click retries.
 
 ## Log levels captured
 

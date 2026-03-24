@@ -40,6 +40,11 @@ Choose mode based on whether interaction is needed:
 - **No interaction needed** (just navigate + collect) → follow `references/single-capture.md`
 - **Interaction needed** (click buttons, open modals, etc.) → follow `references/long-chain.md`
 
+Performance defaults:
+- 默认使用 `auto` 等待策略：交互步骤优先 `domcontentloaded`，仅在“交互后立刻抓变量/执行 eval”时等待 `networkidle`
+- 对隐式 `networkidle` 增加等待上限，避免被长轮询页面拖满整个超时时间
+- 用户只要变量/状态值时优先加 `--no-entries`
+
 ### Step 3 — Analyze the output
 
 **Structure your analysis as:**

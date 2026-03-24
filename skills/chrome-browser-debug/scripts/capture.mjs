@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // capture.mjs — collect browser logs + JS variables via Chrome DevTools Protocol
 //
-// New tab:      node capture.mjs <url> [timeout_ms] [--vars v1,v2] [--keep-tab] [--click "text"] [--dump-dom]
-// Existing tab: node capture.mjs --tab-id <id> [--click "text"] [--fill "ph::text"] [--select "ph::value"] [--vars v1,v2] [--dump-dom] [--close]
+// New tab:      node capture.mjs <url> [timeout_ms] [--vars v1,v2] [--keep-tab] [--click "text"] [--dump-dom] [--action-wait auto|networkidle|domcontentloaded|timeout|none] [--no-entries]
+// Existing tab: node capture.mjs --tab-id <id> [--click "text"] [--fill "ph::text"] [--select "ph::value"] [--vars v1,v2] [--dump-dom] [--close] [--action-wait auto|networkidle|domcontentloaded|timeout|none]
 //
 // Long-chain example:
 //   TAB=$(node capture.mjs https://example.com --keep-tab | jq -r .tabId)
@@ -28,12 +28,30 @@ const fillArg     = flagVal('--fill')    // "placeholder::text"
 const selectArg   = flagVal('--select')  // "placeholder::value"
 const varNamesRaw = flagVal('--vars')
 const varNames    = varNamesRaw ? varNamesRaw.split(',').map(s => s.trim()).filter(Boolean) : []
+const evalExpr    = flagVal('--eval')
 const keepTab     = args.includes('--keep-tab')
 const closeTab    = args.includes('--close')
 const dumpDom     = args.includes('--dump-dom')
+const noEntriesFlag = args.includes('--no-entries')
+const entriesLimitRaw = flagVal('--entries-limit')
+const entriesLimit= entriesLimitRaw ? Number(entriesLimitRaw) : null
+const waitUntilRaw = flagVal('--wait-until')
+const actionWaitRaw = flagVal('--action-wait')
+const hasWaitUntilFlag = waitUntilRaw != null
+const hasActionWaitFlag = actionWaitRaw != null
+
+const parsedWaitUntil = (waitUntilRaw === 'domcontentloaded' || waitUntilRaw === 'networkidle' || waitUntilRaw === 'timeout' || waitUntilRaw === 'auto')
+  ? waitUntilRaw
+  : null
+const parsedActionWait = (actionWaitRaw === 'networkidle' || actionWaitRaw === 'domcontentloaded' || actionWaitRaw === 'timeout' || actionWaitRaw === 'none' || actionWaitRaw === 'auto')
+  ? actionWaitRaw
+  : null
+
+const disableEarlyStop = args.includes('--disable-early-stop')
+const followNewTab= !args.includes('--no-follow-new-tab')
 
 // positional args: skip flag names and their values
-const flagsWithValues = new Set(['--tab-id', '--click', '--fill', '--select', '--vars'])
+const flagsWithValues = new Set(['--tab-id', '--click', '--fill', '--select', '--vars', '--eval', '--wait-until', '--action-wait', '--entries-limit'])
 const skipIdx = new Set()
 args.forEach((a, i) => { if (flagsWithValues.has(a)) { skipIdx.add(i); skipIdx.add(i + 1) } })
 const positional = args.filter((a, i) => !a.startsWith('--') && !skipIdx.has(i))
@@ -44,11 +62,48 @@ const timeout   = Number(positional[1] ?? 15_000)
 if (!targetUrl && !tabId) {
   process.stderr.write(
     'Usage:\n' +
-    '  node capture.mjs <url> [timeout_ms] [--vars v1,v2] [--keep-tab] [--click "text"] [--dump-dom]\n' +
-    '  node capture.mjs --tab-id <id> [--click "text"] [--vars v1,v2] [--dump-dom] [--close]\n'
+    '  node capture.mjs <url> [timeout_ms] [--vars v1,v2] [--keep-tab] [--click "text"] [--dump-dom] [--eval "expr"] [--wait-until auto|domcontentloaded|networkidle|timeout] [--action-wait auto|networkidle|domcontentloaded|timeout|none] [--no-entries] [--entries-limit N]\n' +
+    '  node capture.mjs --tab-id <id> [--click "text"] [--vars v1,v2] [--dump-dom] [--close] [--eval "expr"] [--action-wait auto|networkidle|domcontentloaded|timeout|none] [--no-follow-new-tab]\n'
   )
   process.exit(1)
 }
+
+if (!Number.isFinite(timeout) || timeout <= 0) {
+  process.stderr.write(`Invalid timeout: ${String(positional[1])}. timeout_ms must be a positive number.\n`)
+  process.exit(1)
+}
+
+if (entriesLimitRaw != null && (!Number.isInteger(entriesLimit) || entriesLimit <= 0)) {
+  process.stderr.write(`Invalid --entries-limit: ${entriesLimitRaw}. It must be a positive integer.\n`)
+  process.exit(1)
+}
+
+if (waitUntilRaw != null && parsedWaitUntil == null) {
+  process.stderr.write(`Invalid --wait-until: ${waitUntilRaw}. Valid values: auto, domcontentloaded, networkidle, timeout.\n`)
+  process.exit(1)
+}
+
+if (actionWaitRaw != null && parsedActionWait == null) {
+  process.stderr.write(`Invalid --action-wait: ${actionWaitRaw}. Valid values: auto, networkidle, domcontentloaded, timeout, none.\n`)
+  process.exit(1)
+}
+
+const AUTO_NETWORKIDLE_MAX_MS = 6_000
+const hasInteractionAction = Boolean(clickTarget || fillArg || selectArg)
+const hasPostActionCapture = Boolean(evalExpr || varNames.length || dumpDom)
+// Auto-enable --no-entries for pure interaction steps on an existing tab (click/fill/select
+// with no variable/eval/dom capture): entries are noise and slow down the chain.
+const noEntries = noEntriesFlag || Boolean(tabId && hasInteractionAction && !hasPostActionCapture)
+const waitUntil = parsedWaitUntil ?? 'auto'
+const actionWait = parsedActionWait ?? 'auto'
+const effectiveWaitUntil = waitUntil === 'auto'
+  ? 'domcontentloaded'
+  : waitUntil
+const effectiveActionWait = actionWait === 'auto'
+  ? (hasInteractionAction ? 'domcontentloaded' : 'none')
+  : actionWait
+const navigateWaitBudgetMs = hasWaitUntilFlag ? timeout : Math.min(timeout, AUTO_NETWORKIDLE_MAX_MS)
+const actionWaitBudgetMs = hasActionWaitFlag ? timeout : Math.min(timeout, AUTO_NETWORKIDLE_MAX_MS)
 
 if (typeof WebSocket === 'undefined') {
   process.stderr.write('Node.js 21+ required (built-in WebSocket). Current: ' + process.version + '\n')
@@ -127,7 +182,7 @@ if (tabId) {
   tab = await (await fetch(`${CDP_BASE}/json/new`, { method: 'PUT' })).json()
 }
 
-const session = new Session(tab.webSocketDebuggerUrl)
+let session = new Session(tab.webSocketDebuggerUrl)
 await session.open()
 
 // ── log collection ────────────────────────────────────────────────────────────
@@ -175,6 +230,7 @@ session.on('Log.entryAdded', ({ entry }) => {
 let inflight = 0
 let idleTimer = null
 const idleCallbacks = new Set()
+let lastWait = { earlyStop: false, timedOut: false }
 
 function fireIdle() { const cbs = [...idleCallbacks]; idleCallbacks.clear(); cbs.forEach(cb => cb()) }
 function scheduleIdle() {
@@ -186,10 +242,41 @@ session.on('Network.loadingFinished',   () => { inflight = Math.max(0, inflight 
 session.on('Network.loadingFailed',     () => { inflight = Math.max(0, inflight - 1); scheduleIdle() })
 
 function waitForNetworkIdle(maxMs = timeout) {
-  return Promise.race([
-    new Promise(r => { idleCallbacks.add(r); scheduleIdle() }),
-    new Promise(r => setTimeout(r, maxMs)),
-  ])
+  return new Promise(resolve => {
+    let done = false
+    const cb = () => {
+      if (done) return
+      done = true
+      lastWait = { earlyStop: true, timedOut: false }
+      resolve()
+    }
+    idleCallbacks.add(cb)
+    scheduleIdle()
+    setTimeout(() => {
+      if (done) return
+      done = true
+      lastWait = { earlyStop: false, timedOut: true }
+      resolve()
+    }, maxMs)
+  })
+}
+
+async function waitAfterAction(mode, maxMs = timeout) {
+  if (mode === 'none') {
+    lastWait = { earlyStop: true, timedOut: false }
+    return
+  }
+  if (mode === 'networkidle') {
+    await waitForNetworkIdle(maxMs)
+    return
+  }
+  if (mode === 'timeout') {
+    await new Promise(r => setTimeout(r, maxMs))
+    lastWait = { earlyStop: false, timedOut: true }
+    return
+  }
+  await new Promise(r => setTimeout(r, Math.min(500, maxMs)))
+  lastWait = { earlyStop: true, timedOut: false }
 }
 
 // ── enable domains & navigate ─────────────────────────────────────────────────
@@ -201,11 +288,32 @@ await Promise.all([
   session.send('Page.enable'),
 ])
 
+const timings = {
+  navigateMs: null,
+  clickMs: null,
+  fillMs: null,
+  selectMs: null,
+  evalMs: null,
+  varsMs: null,
+  totalMs: null,
+}
+let tabTransition = null
+const tStart = Date.now()
+
 if (!tabId && targetUrl) {
+  const navigateStart = Date.now()
   const pageLoaded = new Promise(r => session.on('Page.loadEventFired', r))
   await session.send('Page.navigate', { url: targetUrl })
   await pageLoaded
-  await waitForNetworkIdle(timeout)
+  if (!disableEarlyStop && effectiveWaitUntil === 'networkidle') {
+    await waitForNetworkIdle(navigateWaitBudgetMs)
+  } else if (effectiveWaitUntil === 'domcontentloaded') {
+    // do nothing extra
+  } else { // timeout-only
+    await new Promise(r => setTimeout(r, timeout))
+    lastWait = { earlyStop: false, timedOut: true }
+  }
+  timings.navigateMs = Date.now() - navigateStart
 }
 
 // ── click element ─────────────────────────────────────────────────────────────
@@ -213,46 +321,134 @@ if (!tabId && targetUrl) {
 let clickResult = null
 
 if (clickTarget) {
-  process.stderr.write(`Clicking: "${clickTarget}"\n`)
+  const clickStart = Date.now()
+  process.stderr.write(`Clicking: \"${clickTarget}\"\\n`)
+
+  const beforeTabs = followNewTab ? await (await fetch(`${CDP_BASE}/json/list`)).json() : null
 
   const r = await session.send('Runtime.evaluate', {
     expression: `(function(q) {
-      let el = null;
-      // try as CSS selector if it looks like one
+      const toText = (node) => (node?.textContent || '').trim();
+      const byText = (nodes) => {
+        const exact = nodes.find(n => toText(n) === q);
+        if (exact) return { el: exact, matchType: 'exact' };
+        const prefix = nodes.find(n => toText(n).startsWith(q));
+        if (prefix) return { el: prefix, matchType: 'prefix' };
+        const contains = nodes.find(n => toText(n).includes(q));
+        if (contains) return { el: contains, matchType: 'contains' };
+        return null;
+      };
+
       const isSelector = q.startsWith('#') || q.startsWith('.') || q.startsWith('[') || q.includes('>');
-      if (isSelector) { try { el = document.querySelector(q) } catch(e) {} }
-      // fall back to text match across all interactive elements
-      if (!el) {
-        const candidates = Array.from(document.querySelectorAll(
-          'button, a, [role=button], [role=tab], [role=menuitem], [role=option], li, span, div, input[type=submit]'
-        ));
-        el = candidates.find(e => e.textContent.trim() === q)
-          ?? candidates.find(e => e.textContent.trim().startsWith(q))
-          ?? candidates.find(e => e.textContent.trim().includes(q));
+      let el = null;
+      let matchStrategy = 'none';
+      let matchType = 'none';
+
+      if (isSelector) {
+        try {
+          el = document.querySelector(q);
+          if (el) {
+            matchStrategy = 'css';
+            matchType = 'selector';
+          }
+        } catch(e) {}
       }
-      if (!el) return JSON.stringify({ found: false, tried: q });
+
+      if (!el) {
+        const strongCandidates = Array.from(document.querySelectorAll(
+          'button, a, [role=button], [role=tab], [role=menuitem], [role=option], input[type=button], input[type=submit]'
+        ));
+        const hit = byText(strongCandidates);
+        if (hit) {
+          el = hit.el;
+          matchStrategy = 'interactive';
+          matchType = hit.matchType;
+        }
+      }
+
+      if (!el) {
+        const weakCandidates = Array.from(document.querySelectorAll('div, span, li')).filter(node => {
+          const hasOnclick = typeof node.onclick === 'function';
+          const tabIndex = node.getAttribute('tabindex');
+          const focusable = tabIndex !== null && Number(tabIndex) >= 0;
+          let pointer = false;
+          try { pointer = window.getComputedStyle(node).cursor === 'pointer'; } catch(e) {}
+          return hasOnclick || focusable || pointer;
+        });
+        const hit = byText(weakCandidates);
+        if (hit) {
+          el = hit.el;
+          matchStrategy = 'weak-interactive';
+          matchType = hit.matchType;
+        }
+      }
+
+      if (!el) return JSON.stringify({ found: false, tried: q, matchStrategy: 'none' });
       el.scrollIntoView({ behavior: 'instant', block: 'center' });
       el.click();
       return JSON.stringify({
         found: true,
-        tag:  el.tagName.toLowerCase(),
-        text: el.textContent.trim().slice(0, 80),
-        id:   el.id || null,
+        tag: el.tagName.toLowerCase(),
+        text: toText(el).slice(0, 80),
+        id: el.id || null,
+        className: typeof el.className === 'string' ? el.className : null,
+        matchStrategy,
+        matchType,
       });
     })(${JSON.stringify(clickTarget)})`,
     returnByValue: true,
   })
 
-  clickResult = JSON.parse(r?.result?.value ?? '{"found":false}')
+  clickResult = JSON.parse(r?.result?.value ?? '{\"found\":false}')
 
   if (!clickResult.found) {
-    process.stderr.write(`  Warning: element not found for "${clickTarget}"\n`)
+    process.stderr.write(`  Warning: element not found for \"${clickTarget}\"\\n`)
   } else {
-    process.stderr.write(`  Clicked: <${clickResult.tag}> "${clickResult.text}"\n`)
-    // wait briefly for click-triggered requests to start, then wait for idle
+    process.stderr.write(`  Clicked: <${clickResult.tag}> \"${clickResult.text}\" (${clickResult.matchStrategy}/${clickResult.matchType})\\n`)
+    // wait briefly for click-triggered requests to start, then wait by action mode
     await new Promise(r => setTimeout(r, 200))
-    await waitForNetworkIdle(timeout)
+    await waitAfterAction(effectiveActionWait, actionWaitBudgetMs)
+
+    // follow new tab if opened
+    if (followNewTab && beforeTabs) {
+      const beforeIds = new Set(beforeTabs.map(t => t.id))
+      let newTarget = null
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline && !newTarget) {
+        const now = await (await fetch(`${CDP_BASE}/json/list`)).json()
+        newTarget = now.find(t => !beforeIds.has(t.id) && (t.type === 'page' || !t.type))
+        if (!newTarget) await new Promise(r => setTimeout(r, 250))
+      }
+      if (newTarget) {
+        // switch session to new tab
+        const fromTabId = tab.id
+        const toTabId   = newTarget.id
+        session.close()
+        tab = newTarget
+        session = new Session(tab.webSocketDebuggerUrl)
+        await session.open()
+        await Promise.all([
+          session.send('Runtime.enable'),
+          session.send('Network.enable'),
+          session.send('Log.enable'),
+          session.send('Page.enable'),
+        ])
+        const readyState = await session.send('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true })
+        tabTransition = {
+          fromTabId,
+          toTabId,
+          reason: 'new-tab-after-click',
+          readyState: readyState?.result?.value ?? null,
+        }
+        // annotate click result with tab switch
+        clickResult.switchedToNewTab = true
+        clickResult.fromTabId = fromTabId
+        clickResult.toTabId   = toTabId
+      }
+    }
   }
+
+  timings.clickMs = Date.now() - clickStart
 }
 
 // ── fill input (locate by placeholder) ───────────────────────────────────────
@@ -260,6 +456,7 @@ if (clickTarget) {
 let fillResult = null
 
 if (fillArg) {
+  const fillStart = Date.now()
   const sep = fillArg.indexOf('::')
   const placeholder = sep !== -1 ? fillArg.slice(0, sep) : fillArg
   const text        = sep !== -1 ? fillArg.slice(sep + 2) : ''
@@ -288,8 +485,10 @@ if (fillArg) {
   } else {
     process.stderr.write(`  Filled: <${fillResult.tag}> placeholder="${fillResult.placeholder}"\n`)
     await new Promise(r => setTimeout(r, 200))
-    await waitForNetworkIdle(timeout)
+    await waitAfterAction(effectiveActionWait, actionWaitBudgetMs)
   }
+
+  timings.fillMs = Date.now() - fillStart
 }
 
 // ── select option (locate by placeholder) ────────────────────────────────────
@@ -297,6 +496,7 @@ if (fillArg) {
 let selectResult = null
 
 if (selectArg) {
+  const selectStart = Date.now()
   const sep         = selectArg.indexOf('::')
   const placeholder = sep !== -1 ? selectArg.slice(0, sep) : selectArg
   const value       = sep !== -1 ? selectArg.slice(sep + 2) : ''
@@ -360,8 +560,10 @@ if (selectArg) {
   } else {
     process.stderr.write(`  Selected: [${selectResult.type}] "${selectResult.text ?? selectResult.value}"\n`)
     await new Promise(r => setTimeout(r, 200))
-    await waitForNetworkIdle(timeout)
+    await waitAfterAction(effectiveActionWait, actionWaitBudgetMs)
   }
+
+  timings.selectMs = Date.now() - selectStart
 }
 
 // ── DOM dump (for Claude to identify selectors) ───────────────────────────────
@@ -394,15 +596,29 @@ if (dumpDom) {
   domSnapshot = JSON.parse(r?.result?.value ?? 'null')
 }
 
-// ── variable capture ──────────────────────────────────────────────────────────
+// ── variable capture / eval ───────────────────────────────────────────────────
+
+let evalResult = null
+if (evalExpr) {
+  const evalStart = Date.now()
+  process.stderr.write(`Evaluating expression: ${evalExpr}\n`)
+  try {
+    const r = await session.send('Runtime.evaluate', { expression: evalExpr, returnByValue: true })
+    evalResult = r?.result?.value ?? null
+  } catch (e) {
+    evalResult = { error: String(e.message) }
+  }
+  timings.evalMs = Date.now() - evalStart
+}
 
 const variables = {}
 
 if (varNames.length) {
+  const varsStart = Date.now()
   process.stderr.write(`Capturing variables: ${varNames.join(', ')}\n`)
 
   const safeSerializerSrc = `
-    (function captureVar(name) {
+    (function captureVar(pathExpr) {
       const skipped = [];
       const seen = new WeakMap();
 
@@ -431,10 +647,28 @@ if (varNames.length) {
         return obj;
       }
 
+      function normalizePath(path) {
+        return path
+          .replace(/\[(\d+)\]/g, '.$1')
+          .replace(/\[['\"]([^'\"]+)['\"]\]/g, '.$1');
+      }
+
+      function getByPath(root, path) {
+        if (Object.prototype.hasOwnProperty.call(root, path)) return root[path];
+        const normalized = normalizePath(path);
+        const parts = normalized.split('.').filter(Boolean);
+        let cur = root;
+        for (const part of parts) {
+          if (cur == null) return undefined;
+          cur = cur[part];
+        }
+        return cur;
+      }
+
       let val;
-      try { val = window[name]; } catch(e) { return JSON.stringify({ exists: false, error: e.message, skippedPaths: [] }); }
+      try { val = getByPath(window, pathExpr); } catch(e) { return JSON.stringify({ exists: false, error: e.message, skippedPaths: [] }); }
       if (val === undefined) return JSON.stringify({ exists: false, skippedPaths: [] });
-      return JSON.stringify({ exists: true, value: safe(val, name, 0), skippedPaths: skipped });
+      return JSON.stringify({ exists: true, value: safe(val, pathExpr, 0), skippedPaths: skipped });
     })
   `
 
@@ -452,6 +686,8 @@ if (varNames.length) {
     }
     process.stderr.write(`  ${varName}: ${variables[varName].exists ? 'found' : 'not found'}${variables[varName].skippedPaths?.length ? ` (${variables[varName].skippedPaths.length} paths skipped)` : ''}\n`)
   }
+
+  timings.varsMs = Date.now() - varsStart
 }
 
 // ── close or keep tab ─────────────────────────────────────────────────────────
@@ -465,19 +701,32 @@ if (shouldClose) await fetch(`${CDP_BASE}/json/close/${tab.id}`)
 
 // ── output ────────────────────────────────────────────────────────────────────
 
+const elapsedMs = Date.now() - tStart
+timings.totalMs = elapsedMs
 const result = {
   ...(keepTab || tabId ? { tabId: tab.id } : {}),
+  activeTabId: tab.id,
   url:        targetUrl ?? tab.url,
   capturedAt: stamp(),
+  elapsedMs,
+  waitUntil: effectiveWaitUntil,
+  actionWait: effectiveActionWait,
+  requestedWaitUntil: waitUntil,
+  requestedActionWait: actionWait,
+  earlyStop: lastWait.earlyStop,
+  timedOut:  lastWait.timedOut,
+  timings,
   total:      logs.length,
   errors:     logs.filter(l => l.level === 'error').length,
   warns:      logs.filter(l => l.level === 'warn').length,
+  ...(tabTransition   ? { tabTransition }      : {}),
   ...(clickTarget     ? { click:  clickResult  } : {}),
   ...(fillArg         ? { fill:   fillResult   } : {}),
   ...(selectArg       ? { select: selectResult } : {}),
   ...(dumpDom         ? { dom:    domSnapshot  } : {}),
+  ...(evalExpr        ? { evalResult }         : {}),
   ...(varNames.length ? { variables }          : {}),
-  entries: logs,
+  ...(noEntries ? {} : { entries: entriesLimit ? logs.slice(Math.max(0, logs.length - entriesLimit)) : logs }),
 }
 
 process.stderr.write(`Done: ${result.errors} errors, ${result.warns} warns, ${result.total} total\n`)

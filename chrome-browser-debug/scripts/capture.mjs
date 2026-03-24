@@ -1,21 +1,49 @@
 #!/usr/bin/env node
 // capture.mjs — collect browser logs + JS variables via Chrome DevTools Protocol
-// Usage: node capture.mjs <url> [timeout_ms] [--vars var1,var2,...]
-// Requires: Chrome running with --remote-debugging-port=9222, Node.js 21+
+//
+// New tab:      node capture.mjs <url> [timeout_ms] [--vars v1,v2] [--keep-tab] [--click "text"] [--dump-dom]
+// Existing tab: node capture.mjs --tab-id <id> [--click "text"] [--vars v1,v2] [--dump-dom] [--close]
+//
+// Long-chain example:
+//   TAB=$(node capture.mjs https://example.com --keep-tab | jq -r .tabId)
+//   node capture.mjs --tab-id $TAB --click "个人"
+//   node capture.mjs --tab-id $TAB --click "收藏"
+//   node capture.mjs --tab-id $TAB --click "添加" --vars __FEDERATION__ --close
 
 const CDP_BASE = 'http://localhost:9222'
-const IDLE_MS  = 500   // ms of network silence → "page settled"
+const IDLE_MS  = 500
 
 // ── argument parsing ──────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2)
-const targetUrl = args[0]
-const varsIdx   = args.indexOf('--vars')
-const varNames  = varsIdx !== -1 ? args[varsIdx + 1]?.split(',').map(s => s.trim()).filter(Boolean) : []
-const timeout   = Number(args.find((a, i) => i > 0 && i !== varsIdx && i !== varsIdx + 1 && !a.startsWith('--')) ?? 15_000)
 
-if (!targetUrl) {
-  process.stderr.write('Usage: node capture.mjs <url> [timeout_ms] [--vars var1,var2,...]\n')
+function flagVal(flag) {
+  const i = args.indexOf(flag); return i !== -1 ? args[i + 1] : null
+}
+
+const tabId       = flagVal('--tab-id')
+const clickTarget = flagVal('--click')
+const varNamesRaw = flagVal('--vars')
+const varNames    = varNamesRaw ? varNamesRaw.split(',').map(s => s.trim()).filter(Boolean) : []
+const keepTab     = args.includes('--keep-tab')
+const closeTab    = args.includes('--close')
+const dumpDom     = args.includes('--dump-dom')
+
+// positional args: skip flag names and their values
+const flagsWithValues = new Set(['--tab-id', '--click', '--vars'])
+const skipIdx = new Set()
+args.forEach((a, i) => { if (flagsWithValues.has(a)) { skipIdx.add(i); skipIdx.add(i + 1) } })
+const positional = args.filter((a, i) => !a.startsWith('--') && !skipIdx.has(i))
+
+const targetUrl = positional[0] ?? null
+const timeout   = Number(positional[1] ?? 15_000)
+
+if (!targetUrl && !tabId) {
+  process.stderr.write(
+    'Usage:\n' +
+    '  node capture.mjs <url> [timeout_ms] [--vars v1,v2] [--keep-tab] [--click "text"] [--dump-dom]\n' +
+    '  node capture.mjs --tab-id <id> [--click "text"] [--vars v1,v2] [--dump-dom] [--close]\n'
+  )
   process.exit(1)
 }
 
@@ -34,20 +62,17 @@ class Session {
     this.#ws.addEventListener('message', ({ data }) => {
       const msg = JSON.parse(data)
       if (msg.id != null) {
-        const p = this.#pending.get(msg.id)
-        this.#pending.delete(msg.id)
+        const p = this.#pending.get(msg.id); this.#pending.delete(msg.id)
         msg.error ? p?.reject(new Error(msg.error.message)) : p?.resolve(msg.result)
       }
-      if (msg.method) {
-        this.#listeners.get(msg.method)?.forEach(fn => fn(msg.params))
-      }
+      if (msg.method) this.#listeners.get(msg.method)?.forEach(fn => fn(msg.params))
     })
   }
 
   open() {
     return new Promise((resolve, reject) => {
       this.#ws.addEventListener('open',  resolve, { once: true })
-      this.#ws.addEventListener('error', (e) => reject(new Error(String(e.message ?? e))), { once: true })
+      this.#ws.addEventListener('error', e => reject(new Error(String(e.message ?? e))), { once: true })
     })
   }
 
@@ -81,13 +106,24 @@ try {
   process.exit(1)
 }
 
-// ── open new tab (shares user's cookies / auth state) ────────────────────────
+// ── get or create tab ─────────────────────────────────────────────────────────
 
-process.stderr.write(`Navigating to ${targetUrl} (timeout: ${timeout / 1000}s)...\n`)
-if (varNames.length) process.stderr.write(`Capturing variables: ${varNames.join(', ')}\n`)
+let tab
 
-const tabRes = await fetch(`${CDP_BASE}/json/new`, { method: 'PUT' })
-const tab    = await tabRes.json()
+if (tabId) {
+  const tabs = await (await fetch(`${CDP_BASE}/json/list`)).json()
+  tab = tabs.find(t => t.id === tabId)
+  if (!tab) {
+    process.stderr.write(`Tab not found: ${tabId}\nActive tabs:\n`)
+    tabs.forEach(t => process.stderr.write(`  ${t.id}  ${t.url}\n`))
+    process.exit(1)
+  }
+  process.stderr.write(`Attaching to tab: ${tab.url}\n`)
+} else {
+  process.stderr.write(`Navigating to ${targetUrl} (timeout: ${timeout / 1000}s)...\n`)
+  tab = await (await fetch(`${CDP_BASE}/json/new`, { method: 'PUT' })).json()
+}
+
 const session = new Session(tab.webSocketDebuggerUrl)
 await session.open()
 
@@ -96,102 +132,62 @@ await session.open()
 const logs = []
 const stamp = () => new Date().toISOString()
 
-// console.log / warn / error / info / debug
-session.on('Runtime.consoleAPICalled', ({ type, args, stackTrace }) => {
-  const msg = args.map(a =>
-    a.type === 'string' ? a.value
-    : a.description     ? a.description
-    : a.value != null   ? String(a.value)
-    : a.type
+session.on('Runtime.consoleAPICalled', ({ type, args: a, stackTrace }) => {
+  const msg = a.map(x =>
+    x.type === 'string' ? x.value
+    : x.description     ? x.description
+    : x.value != null   ? String(x.value)
+    : x.type
   ).join(' ')
   const f = stackTrace?.callFrames?.[0]
-  logs.push({
-    t:     stamp(),
-    level: type === 'warning' ? 'warn' : type,
-    msg,
-    stack: f ? `${f.url}:${f.lineNumber + 1}:${f.columnNumber + 1}` : null,
-  })
+  logs.push({ t: stamp(), level: type === 'warning' ? 'warn' : type, msg, stack: f ? `${f.url}:${f.lineNumber + 1}:${f.columnNumber + 1}` : null })
 })
 
-// uncaught JS exceptions
 session.on('Runtime.exceptionThrown', ({ exceptionDetails: ex }) => {
   const msg = ex.exception?.description ?? ex.text ?? 'Unknown exception'
-  const f   = ex.stackTrace?.callFrames?.[0]
-  logs.push({
-    t:     stamp(),
-    level: 'error',
-    msg,
-    stack: f ? `${f.url}:${f.lineNumber + 1}` : null,
-  })
+  const f = ex.stackTrace?.callFrames?.[0]
+  logs.push({ t: stamp(), level: 'error', msg, stack: f ? `${f.url}:${f.lineNumber + 1}` : null })
 })
 
-// HTTP 4xx / 5xx
 session.on('Network.responseReceived', ({ response }) => {
   if (response.status < 400) return
-  logs.push({
-    t:     stamp(),
-    level: response.status >= 500 ? 'error' : 'warn',
-    msg:   `[HTTP] ${response.status} ${response.statusText} — ${response.url}`,
-    stack: null,
-  })
+  logs.push({ t: stamp(), level: response.status >= 500 ? 'error' : 'warn', msg: `[HTTP] ${response.status} ${response.statusText} — ${response.url}`, stack: null })
 })
 
-// network failures (CORS, DNS, timeout, connection refused …)
 const pendingUrls = new Map()
-session.on('Network.requestWillBeSent', ({ requestId, request }) => {
-  pendingUrls.set(requestId, request.url)
-})
+session.on('Network.requestWillBeSent', ({ requestId, request }) => pendingUrls.set(requestId, request.url))
 session.on('Network.loadingFailed', ({ requestId, errorText, blockedReason, canceled }) => {
-  if (canceled) return   // user navigated away — not an error
-  const url = pendingUrls.get(requestId) ?? '?'
+  if (canceled) return
+  logs.push({ t: stamp(), level: 'error', msg: `[network] ${blockedReason ?? errorText} — ${pendingUrls.get(requestId) ?? '?'}`, stack: null })
   pendingUrls.delete(requestId)
-  logs.push({
-    t:     stamp(),
-    level: 'error',
-    msg:   `[network] ${blockedReason ?? errorText} — ${url}`,
-    stack: null,
-  })
 })
 
-// browser-native entries: CSP violations, deprecations, security warnings …
 session.on('Log.entryAdded', ({ entry }) => {
   if (entry.level === 'verbose') return
-  logs.push({
-    t:     stamp(),
-    level: entry.level === 'warning' ? 'warn' : entry.level,
-    msg:   entry.text,
-    stack: entry.url ? `${entry.url}:${entry.lineNumber ?? 0}` : null,
-  })
+  logs.push({ t: stamp(), level: entry.level === 'warning' ? 'warn' : entry.level, msg: entry.text, stack: entry.url ? `${entry.url}:${entry.lineNumber ?? 0}` : null })
 })
 
-// ── network-idle detection ────────────────────────────────────────────────────
-//
-// Strategy: track in-flight requests. Once the page's load event has fired
-// AND inflight drops to 0, start a 500ms quiet timer. If no new request
-// interrupts it, we consider the page settled.
+// ── reusable network-idle waiter ──────────────────────────────────────────────
 
-let inflight  = 0
+let inflight = 0
 let idleTimer = null
-let resolveIdle
-const idlePromise = new Promise(r => { resolveIdle = r })
-let pageLoaded    = false
+const idleCallbacks = new Set()
 
+function fireIdle() { const cbs = [...idleCallbacks]; idleCallbacks.clear(); cbs.forEach(cb => cb()) }
 function scheduleIdle() {
-  if (pageLoaded && inflight === 0 && !idleTimer) {
-    idleTimer = setTimeout(resolveIdle, IDLE_MS)
-  }
+  if (inflight === 0 && idleCallbacks.size > 0) { clearTimeout(idleTimer); idleTimer = setTimeout(fireIdle, IDLE_MS) }
 }
 
-session.on('Network.requestWillBeSent', () => {
-  inflight++
-  clearTimeout(idleTimer)
-  idleTimer = null
-})
-session.on('Network.loadingFinished', () => { inflight = Math.max(0, inflight - 1); scheduleIdle() })
-session.on('Network.loadingFailed',   () => { inflight = Math.max(0, inflight - 1); scheduleIdle() })
+session.on('Network.requestWillBeSent', () => { inflight++; clearTimeout(idleTimer); idleTimer = null })
+session.on('Network.loadingFinished',   () => { inflight = Math.max(0, inflight - 1); scheduleIdle() })
+session.on('Network.loadingFailed',     () => { inflight = Math.max(0, inflight - 1); scheduleIdle() })
 
-// Only start idle countdown after the initial load event fires
-session.on('Page.loadEventFired', () => { pageLoaded = true; scheduleIdle() })
+function waitForNetworkIdle(maxMs = timeout) {
+  return Promise.race([
+    new Promise(r => { idleCallbacks.add(r); scheduleIdle() }),
+    new Promise(r => setTimeout(r, maxMs)),
+  ])
+}
 
 // ── enable domains & navigate ─────────────────────────────────────────────────
 
@@ -202,33 +198,104 @@ await Promise.all([
   session.send('Page.enable'),
 ])
 
-await session.send('Page.navigate', { url: targetUrl })
+if (!tabId && targetUrl) {
+  const pageLoaded = new Promise(r => session.on('Page.loadEventFired', r))
+  await session.send('Page.navigate', { url: targetUrl })
+  await pageLoaded
+  await waitForNetworkIdle(timeout)
+}
 
-await Promise.race([
-  idlePromise,
-  new Promise(r => setTimeout(r, timeout)),
-])
+// ── click element ─────────────────────────────────────────────────────────────
+
+let clickResult = null
+
+if (clickTarget) {
+  process.stderr.write(`Clicking: "${clickTarget}"\n`)
+
+  const r = await session.send('Runtime.evaluate', {
+    expression: `(function(q) {
+      let el = null;
+      // try as CSS selector if it looks like one
+      const isSelector = q.startsWith('#') || q.startsWith('.') || q.startsWith('[') || q.includes('>');
+      if (isSelector) { try { el = document.querySelector(q) } catch(e) {} }
+      // fall back to text match across all interactive elements
+      if (!el) {
+        const candidates = Array.from(document.querySelectorAll(
+          'button, a, [role=button], [role=tab], [role=menuitem], [role=option], li, span, div, input[type=submit]'
+        ));
+        el = candidates.find(e => e.textContent.trim() === q)
+          ?? candidates.find(e => e.textContent.trim().startsWith(q))
+          ?? candidates.find(e => e.textContent.trim().includes(q));
+      }
+      if (!el) return JSON.stringify({ found: false, tried: q });
+      el.scrollIntoView({ behavior: 'instant', block: 'center' });
+      el.click();
+      return JSON.stringify({
+        found: true,
+        tag:  el.tagName.toLowerCase(),
+        text: el.textContent.trim().slice(0, 80),
+        id:   el.id || null,
+      });
+    })(${JSON.stringify(clickTarget)})`,
+    returnByValue: true,
+  })
+
+  clickResult = JSON.parse(r?.result?.value ?? '{"found":false}')
+
+  if (!clickResult.found) {
+    process.stderr.write(`  Warning: element not found for "${clickTarget}"\n`)
+  } else {
+    process.stderr.write(`  Clicked: <${clickResult.tag}> "${clickResult.text}"\n`)
+    // wait briefly for click-triggered requests to start, then wait for idle
+    await new Promise(r => setTimeout(r, 200))
+    await waitForNetworkIdle(timeout)
+  }
+}
+
+// ── DOM dump (for Claude to identify selectors) ───────────────────────────────
+
+let domSnapshot = null
+
+if (dumpDom) {
+  const r = await session.send('Runtime.evaluate', {
+    expression: `(function() {
+      function walk(el, depth) {
+        if (depth > 4) return null;
+        const tag = el.tagName?.toLowerCase();
+        if (!tag || ['script','style','svg','noscript','head'].includes(tag)) return null;
+        const text = el.children.length === 0 ? el.textContent.trim().slice(0, 120) : '';
+        const attrs = {};
+        if (el.id) attrs.id = el.id;
+        if (el.className && typeof el.className === 'string') {
+          const cls = el.className.split(' ').filter(Boolean);
+          if (cls.length) attrs.class = cls.slice(0, 4).join(' ');
+        }
+        const role = el.getAttribute('role'); if (role) attrs.role = role;
+        const children = Array.from(el.children).map(c => walk(c, depth + 1)).filter(Boolean);
+        if (!text && !children.length && !Object.keys(attrs).length) return null;
+        return { tag, ...(Object.keys(attrs).length ? { attrs } : {}), ...(text ? { text } : {}), ...(children.length ? { children } : {}) };
+      }
+      return JSON.stringify(walk(document.body, 0));
+    })()`,
+    returnByValue: true,
+  })
+  domSnapshot = JSON.parse(r?.result?.value ?? 'null')
+}
 
 // ── variable capture ──────────────────────────────────────────────────────────
-//
-// Evaluates each requested variable in the page context using a safe serializer
-// that handles circular references and non-serializable values. Skipped paths
-// (circular, functions, max-depth) are recorded separately.
 
 const variables = {}
 
 if (varNames.length) {
-  // The safe serializer runs inside the page — injected as a string expression
+  process.stderr.write(`Capturing variables: ${varNames.join(', ')}\n`)
+
   const safeSerializerSrc = `
     (function captureVar(name) {
       const skipped = [];
       const seen = new WeakMap();
 
       function safe(val, path, depth) {
-        if (depth > 5) {
-          skipped.push({ path, reason: 'max_depth' });
-          return '[max depth]';
-        }
+        if (depth > 5) { skipped.push({ path, reason: 'max_depth' }); return '[max depth]'; }
         if (val === null || val === undefined) return val;
         const t = typeof val;
         if (t === 'boolean' || t === 'number' || t === 'string') return val;
@@ -243,42 +310,31 @@ if (varNames.length) {
           return '[Circular -> ' + seen.get(val) + ']';
         }
         seen.set(val, path);
-        if (Array.isArray(val)) {
-          return val.map((v, i) => safe(v, path + '[' + i + ']', depth + 1));
-        }
+        if (Array.isArray(val)) return val.map((v, i) => safe(v, path + '[' + i + ']', depth + 1));
         const obj = {};
         for (const k of Object.keys(val)) {
-          try {
-            obj[k] = safe(val[k], path + '.' + k, depth + 1);
-          } catch (e) {
-            skipped.push({ path: path + '.' + k, reason: 'error', detail: e.message });
-            obj[k] = '[Error: ' + e.message + ']';
-          }
+          try { obj[k] = safe(val[k], path + '.' + k, depth + 1); }
+          catch (e) { skipped.push({ path: path + '.' + k, reason: 'error', detail: e.message }); obj[k] = '[Error: ' + e.message + ']'; }
         }
         return obj;
       }
 
       let val;
-      try { val = window[name]; } catch(e) {
-        return JSON.stringify({ exists: false, error: e.message, skippedPaths: [] });
-      }
-      if (val === undefined) {
-        return JSON.stringify({ exists: false, skippedPaths: [] });
-      }
-      const serialized = safe(val, name, 0);
-      return JSON.stringify({ exists: true, value: serialized, skippedPaths: skipped });
+      try { val = window[name]; } catch(e) { return JSON.stringify({ exists: false, error: e.message, skippedPaths: [] }); }
+      if (val === undefined) return JSON.stringify({ exists: false, skippedPaths: [] });
+      return JSON.stringify({ exists: true, value: safe(val, name, 0), skippedPaths: skipped });
     })
   `
 
   for (const varName of varNames) {
     try {
-      const expr = `(${safeSerializerSrc})(${JSON.stringify(varName)})`
-      const r = await session.send('Runtime.evaluate', { expression: expr, returnByValue: true })
-      if (r?.result?.value) {
-        variables[varName] = JSON.parse(r.result.value)
-      } else {
-        variables[varName] = { exists: false, error: r?.result?.description ?? 'unknown' }
-      }
+      const r = await session.send('Runtime.evaluate', {
+        expression: `(${safeSerializerSrc})(${JSON.stringify(varName)})`,
+        returnByValue: true,
+      })
+      variables[varName] = r?.result?.value
+        ? JSON.parse(r.result.value)
+        : { exists: false, error: r?.result?.description ?? 'unknown' }
     } catch (e) {
       variables[varName] = { exists: false, error: String(e.message) }
     }
@@ -286,19 +342,28 @@ if (varNames.length) {
   }
 }
 
+// ── close or keep tab ─────────────────────────────────────────────────────────
+// Default behaviour:
+//   new tab  (no --tab-id)  → close unless --keep-tab
+//   existing tab (--tab-id) → keep unless --close
+
+const shouldClose = closeTab || (!keepTab && !tabId)
 session.close()
-await fetch(`${CDP_BASE}/json/close/${tab.id}`)
+if (shouldClose) await fetch(`${CDP_BASE}/json/close/${tab.id}`)
 
 // ── output ────────────────────────────────────────────────────────────────────
 
 const result = {
-  url:        targetUrl,
+  ...(keepTab || tabId ? { tabId: tab.id } : {}),
+  url:        targetUrl ?? tab.url,
   capturedAt: stamp(),
   total:      logs.length,
   errors:     logs.filter(l => l.level === 'error').length,
   warns:      logs.filter(l => l.level === 'warn').length,
-  ...(varNames.length ? { variables } : {}),
-  entries:    logs,
+  ...(clickTarget     ? { click: clickResult } : {}),
+  ...(dumpDom         ? { dom: domSnapshot }   : {}),
+  ...(varNames.length ? { variables }          : {}),
+  entries: logs,
 }
 
 process.stderr.write(`Done: ${result.errors} errors, ${result.warns} warns, ${result.total} total\n`)

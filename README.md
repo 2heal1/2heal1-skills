@@ -72,60 +72,29 @@ chrome-debug "Profile 2" # use a specific account
 
 ### Script usage
 
+**Single capture** — navigate + collect, tab auto-closes:
 ```bash
 node scripts/capture.mjs "<url>" [timeout_ms] [--vars var1,var2,...]
 ```
 
-**Examples:**
-
+**Long-chain** — keep tab alive, click through interactions:
 ```bash
-# Capture logs only
-node scripts/capture.mjs "https://www.douyin.com/" 20000
-
-# Capture logs + extract JS variables
-node scripts/capture.mjs "https://www.douyin.com/" 25000 --vars __VMOK__
-node scripts/capture.mjs "https://www.tiktok.com/" 25000 --vars __FEDERATION__,__NEXT_DATA__
+TAB=$(node scripts/capture.mjs "https://example.com" --keep-tab | jq -r .tabId)
+node scripts/capture.mjs --tab-id "$TAB" --click "个人"
+node scripts/capture.mjs --tab-id "$TAB" --click "收藏"
+node scripts/capture.mjs --tab-id "$TAB" --click "添加" --vars __FEDERATION__ --close
 ```
 
-### Output format
+**All flags:**
 
-```json
-{
-  "url": "https://www.douyin.com/",
-  "capturedAt": "2026-03-23T11:46:38.671Z",
-  "total": 78,
-  "errors": 35,
-  "warns": 6,
-  "variables": {
-    "__VMOK__": {
-      "exists": true,
-      "value": {
-        "__GLOBAL_PLUGIN__": ["..."],
-        "__INSTANCES__": ["..."],
-        "__SHARE__": {}
-      },
-      "skippedPaths": [
-        { "path": "__VMOK__.snapshotHandler", "reason": "circular", "circularRef": "__VMOK__" },
-        { "path": "__VMOK__.init", "reason": "function", "detail": "init" }
-      ]
-    }
-  },
-  "entries": [
-    { "t": "...", "level": "error", "msg": "...", "stack": "file.js:1:100" }
-  ]
-}
-```
-
-**Variable serialization rules:**
-
-| Case | Output |
-|------|--------|
-| Circular reference | `[Circular -> path.to.original]` |
-| Function | `[Function: functionName]` |
-| Depth > 5 | `[max depth]` |
-| Property access error | `[Error: message]` |
-
-All skipped paths are recorded in `skippedPaths[]` with `path`, `reason`, and `detail` fields.
+| Flag | Description |
+|------|-------------|
+| `--vars v1,v2` | Extract JS variables from the page |
+| `--keep-tab` | Don't close tab; outputs `tabId` |
+| `--tab-id <id>` | Attach to existing tab |
+| `--click "<text>"` | Click by text or CSS selector, waits for network idle |
+| `--dump-dom` | Output page DOM (for identifying selectors) |
+| `--close` | Close the tab after this step |
 
 ### Real-world results
 
@@ -141,9 +110,11 @@ All skipped paths are recorded in `skippedPaths[]` with `path`, `reason`, and `d
 ```
 2heal1-skills/
 └── chrome-browser-debug/
-    ├── SKILL.md               # skill entry point (read by Claude)
+    ├── SKILL.md                      # skill entry point (read by Claude)
     ├── scripts/
-    │   └── capture.mjs        # CDP capture script
+    │   └── capture.mjs               # CDP capture script
     └── references/
-        └── setup.md           # one-time setup guide
+        ├── setup.md                  # one-time Chrome setup
+        ├── single-capture.md         # single capture usage + output format
+        └── long-chain.md             # long-chain usage (click / tabId / dump-dom)
 ```

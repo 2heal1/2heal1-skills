@@ -105,11 +105,42 @@ node scripts/capture.mjs --tab-id "$TAB" --click "添加" --vars __FEDERATION__ 
 
 ---
 
+## agent-activity-report
+
+Generate Markdown daily or weekly reports from local Codex, Claude Code, Copilot, and Git activity history.
+
+### When it triggers
+
+- "生成今天 Codex 和 Claude Code 做了什么的日报"
+- "整理上周 AI agent 做的事情，按大任务分组"
+- "提取 Codex / Claude Code / Copilot / Git 最近一周的工作，生成周报"
+- "把长期任务下面的小任务归到同一个标题里"
+
+### Script usage
+
+```bash
+python3 skills/agent-activity-report/scripts/collect_activity.py \
+  --range "last week" \
+  --output reports/weekly-last-week.md \
+  --json-output reports/weekly-last-week.evidence.json
+```
+
+Supported ranges include `today`, `yesterday`, `this week`, `last week`, `past 7 days`, `YYYY-MM-DD..YYYY-MM-DD`, `今天`, `昨天`, `本周`, `上周`, and `过去7天`.
+
+---
+
 ## Directory structure
 
 ```
 2heal1-skills/
 └── skills/
+    ├── agent-activity-report/
+    │   ├── SKILL.md
+    │   ├── scripts/
+    │   │   └── collect_activity.py
+    │   └── references/
+    │       ├── grouping-rules.md
+    │       └── report-workflow.md
     └── chrome-browser-debug/
         ├── SKILL.md                  # skill entry point (read by Claude)
         ├── scripts/

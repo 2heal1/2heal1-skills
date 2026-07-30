@@ -155,6 +155,32 @@ The skill does not store OTP codes, npm tokens, or auth state in repo files. It 
 
 ---
 
+## bootstrap-npm-oidc-repo
+
+Initialize an npm package repository and leave contributors with a complete CI,
+preview release, release pull request, and automatic OIDC publishing flow.
+
+### When it triggers
+
+- "初始化这个 npm 包仓库，并配置 OIDC 发布"
+- "给 pnpm 项目搭好 CI、预览版本和 release PR"
+- "发布初始包，然后配置 npm trusted publishing"
+- "把一个空仓库交付成可自动发包的仓库"
+
+### What it covers
+
+- Confirms the package name, initial version, package manager, and repository
+  before publishing.
+- Keeps pnpm or npm metadata, lockfiles, commands, and workflows consistent.
+- Creates CI, Changesets preview publishing, release pull requests, and stable
+  publishing after merge.
+- Reuses `npm-oidc-release` for OTP-assisted bootstrap publishing and trusted
+  publisher setup.
+- Includes a validator that catches package-manager mismatches and unsafe
+  release workflow changes.
+
+---
+
 ## Directory structure
 
 ```
@@ -167,6 +193,14 @@ The skill does not store OTP codes, npm tokens, or auth state in repo files. It 
     │   └── references/
     │       ├── grouping-rules.md
     │       └── report-workflow.md
+    ├── bootstrap-npm-oidc-repo/
+    │   ├── SKILL.md
+    │   ├── agents/
+    │   │   └── openai.yaml
+    │   ├── scripts/
+    │   │   └── validate_release_setup.mjs
+    │   └── references/
+    │       └── repository-contract.md
     ├── chrome-browser-debug/
     │   ├── SKILL.md                  # skill entry point (read by Claude)
     │   ├── scripts/

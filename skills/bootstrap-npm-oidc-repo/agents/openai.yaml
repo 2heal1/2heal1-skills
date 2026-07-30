@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bootstrap npm OIDC Repo"
+  short_description: "Initialize npm package repos with OIDC releases"
+  default_prompt: "Use $bootstrap-npm-oidc-repo to initialize this repository, publish its bootstrap package, and configure npm OIDC releases."

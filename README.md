@@ -129,6 +129,32 @@ Supported ranges include `today`, `yesterday`, `this week`, `last week`, `past 7
 
 ---
 
+## npm-oidc-release
+
+Set up and run npm package release flows that use GitHub Actions trusted publishing/OIDC, with a safe local bootstrap path when an npm OTP is required.
+
+### When it triggers
+
+- "创建 release.yml，配置 npm OIDC 发包"
+- "这个包需要先本地发一次，我给你 OTP"
+- "帮我配置 npm trusted publishing"
+- "修一下 npm 发布 workflow"
+- "Use OIDC for npm publish instead of NPM_TOKEN"
+
+### What it covers
+
+- Create or repair `.github/workflows/release.yml`.
+- Configure npm trusted publishing with the workflow filename, for example `release.yml`.
+- Publish the first package version locally when npm requires the package to exist before OIDC can be configured.
+- Use a user-provided OTP only for the publish command that needs it.
+- Verify package archives and `npm view` results after publishing.
+
+### Safety
+
+The skill does not store OTP codes, npm tokens, or auth state in repo files. It prefers existing repository release scripts over direct `npm publish` whenever those scripts exist.
+
+---
+
 ## Directory structure
 
 ```
@@ -141,12 +167,18 @@ Supported ranges include `today`, `yesterday`, `this week`, `last week`, `past 7
     │   └── references/
     │       ├── grouping-rules.md
     │       └── report-workflow.md
-    └── chrome-browser-debug/
-        ├── SKILL.md                  # skill entry point (read by Claude)
-        ├── scripts/
-        │   └── capture.mjs           # CDP capture script
+    ├── chrome-browser-debug/
+    │   ├── SKILL.md                  # skill entry point (read by Claude)
+    │   ├── scripts/
+    │   │   └── capture.mjs           # CDP capture script
+    │   └── references/
+    │       ├── setup.md              # one-time Chrome setup
+    │       ├── single-capture.md     # single capture usage + output format
+    │       └── long-chain.md         # long-chain usage (click / tabId / DOM dump)
+    └── npm-oidc-release/
+        ├── SKILL.md
+        ├── agents/
+        │   └── openai.yaml
         └── references/
-            ├── setup.md              # one-time Chrome setup
-            ├── single-capture.md     # single capture usage + output format
-            └── long-chain.md         # long-chain usage (click / tabId / dump-dom)
+            └── npm-oidc-release.md
 ```

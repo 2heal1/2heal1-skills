@@ -1,0 +1,4 @@
+interface:
+  display_name: "NPM OIDC Release"
+  short_description: "Set up npm OIDC releases and OTP publishing"
+  default_prompt: "Use $npm-oidc-release to set up npm OIDC publishing and guide the local OTP release flow."

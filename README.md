@@ -181,6 +181,29 @@ preview release, release pull request, and automatic OIDC publishing flow.
 
 ---
 
+## write-rfc
+
+Write, revise, or review engineering RFCs using concrete evidence, explicit
+tradeoffs, and visuals that explain architecture, behavior, or measured data.
+Keep the writing concise without removing constraints, failure paths, or
+validation criteria. Use GIFs or video when time and interaction help explain
+the proposal, with a static fallback and clear provenance.
+
+### When it triggers
+
+- "用 $write-rfc 写一个技术方案，文字精简、图示清楚"
+- "把这份设计整理成 RFC，补上证据、取舍和验证计划"
+- "评审这个 RFC，找出主观判断、证据缺口和边界遗漏"
+
+### Included resources
+
+- [Skill instructions](skills/write-rfc/SKILL.md)
+- [Adaptable RFC template](skills/write-rfc/assets/rfc-template.md)
+- [Visual and animation guide](skills/write-rfc/references/visual-guide.md)
+- [Community writing patterns](skills/write-rfc/references/community-patterns.md)
+
+---
+
 ## Directory structure
 
 ```
@@ -209,10 +232,19 @@ preview release, release pull request, and automatic OIDC publishing flow.
     │       ├── setup.md              # one-time Chrome setup
     │       ├── single-capture.md     # single capture usage + output format
     │       └── long-chain.md         # long-chain usage (click / tabId / DOM dump)
-    └── npm-oidc-release/
+    ├── npm-oidc-release/
+    │   ├── SKILL.md
+    │   ├── agents/
+    │   │   └── openai.yaml
+    │   └── references/
+    │       └── npm-oidc-release.md
+    └── write-rfc/
         ├── SKILL.md
         ├── agents/
         │   └── openai.yaml
+        ├── assets/
+        │   └── rfc-template.md
         └── references/
-            └── npm-oidc-release.md
+            ├── community-patterns.md
+            └── visual-guide.md
 ```

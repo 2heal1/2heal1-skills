@@ -204,6 +204,25 @@ the proposal, with a static fallback and clear provenance.
 
 ---
 
+## pr-review-guide
+
+Explain a pull request using its actual diff and call chain, then recommend where
+to begin reviewing, what to read next, and what to check at each step.
+
+### Usage
+
+```text
+$pr-review-guide https://github.com/owner/repo/pull/123
+```
+
+The guide links to exact code locations, distinguishes stacked PR increments,
+and maps the change's promises to tests. It provides reading guidance without
+automatically modifying, approving, or merging the PR.
+
+- [Skill instructions](skills/pr-review-guide/SKILL.md)
+
+---
+
 ## Directory structure
 
 ```
@@ -238,6 +257,10 @@ the proposal, with a static fallback and clear provenance.
     │   │   └── openai.yaml
     │   └── references/
     │       └── npm-oidc-release.md
+    ├── pr-review-guide/
+    │   ├── SKILL.md
+    │   └── agents/
+    │       └── openai.yaml
     └── write-rfc/
         ├── SKILL.md
         ├── agents/

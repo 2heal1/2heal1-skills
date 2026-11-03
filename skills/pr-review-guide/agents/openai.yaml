@@ -1,0 +1,4 @@
+interface:
+  display_name: "PR Review 导读"
+  short_description: "基于 PR 的实际代码与调用链，解释改动目的并给出阅读顺序和检查重点"
+  default_prompt: "使用 $pr-review-guide 分析这个 PR，说明改动目的、关键调用链，以及我应该从哪里开始 review。"
